@@ -1,0 +1,13 @@
+{
+  "AlarmName": "todo-eks-cpu-high",
+  "ComparisonOperator": "GreaterThanThreshold",
+  "EvaluationPeriods": 2,
+  "MetricName": "CPUUtilization",
+  "Namespace": "AWS/EC2",
+  "Period": 300,
+  "Statistic": "Average",
+  "Threshold": 80,
+  "ActionsEnabled": false,
+  "AlarmDescription": "Alarm when CPU > 80%",
+  "Dimensions": []
+}

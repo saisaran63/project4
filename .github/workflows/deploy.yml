@@ -1,0 +1,51 @@
+name: Build & Deploy
+on:
+  push:
+    branches: [ main ]
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+  EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+  DDB_TABLE_NAME: ${{ secrets.DDB_TABLE_NAME }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS creds (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Build & Push
+        run: |
+          IMAGE_TAG=${GITHUB_SHA::7}
+          docker build -t $ECR_REPOSITORY:$IMAGE_TAG ./app
+          docker push $ECR_REPOSITORY:$IMAGE_TAG
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+      - name: Update Helm values
+        run: |
+          sed -i "s|CHANGEME_ECR_REPO|$ECR_REPOSITORY|g" charts/todo-api/values.yaml
+          echo "env:" >> charts/todo-api/values.yaml
+          echo "  TABLE_NAME: $DDB_TABLE_NAME" >> charts/todo-api/values.yaml
+          echo "image:" >> charts/todo-api/values.yaml
+      - name: Deploy to EKS
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+        run: |
+          aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
+          helm upgrade --install todo-api charts/todo-api             --namespace todo --create-namespace             --set image.repository=$ECR_REPOSITORY             --set image.tag=$IMAGE_TAG             --set env.TABLE_NAME=$DDB_TABLE_NAME             --set service.type=LoadBalancer             --set ingress.enabled=false
+  promote-prod:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - run: echo "Manual approval gate to promote to production."

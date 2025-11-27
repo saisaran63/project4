@@ -1,0 +1,6 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: todo-api-sa
+  annotations:
+    eks.amazonaws.com/role-arn: {{ .Values.irsaRoleArn | default "CHANGEME_IRSA_ROLE_ARN" }}

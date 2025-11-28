@@ -45,51 +45,65 @@ jobs:
         run: |
           docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/$ECR_REPOSITORY:latest
 
+      } --service ${SERVICE_NAME} --force-new-deployment
+
       - name: Register new task definition and update ECS service
         env:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-          ECR_REPOSITORY: $ECR_REPOSITORY
+          ECR_REPOSITORY: devops-microservice
           TASK_FAMILY: devops-microservice-task
           CLUSTER_NAME: devops-cluster
-          SERVICE_NAME: devops-service
-          CONTAINER_NAME: $CONTAINER_NAME
-          CONTAINER_PORT: $CONTAINER_PORT
+          SERVICE_NAME: ecs-task-service-c7qhc25h    # <- use your actual service name
+          CONTAINER_NAME: container
+          CONTAINER_PORT: 80
         run: |
-          # Create a new task definition JSON using the pushed image
-          IMAGE_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:latest
-          echo "Registering Task Definition with image $IMAGE_URI"
+          set -euo pipefail
 
-          cat > taskdef.json <<EOF
-{
-  "family": "${TASK_FAMILY}",
+          IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:latest"
+          echo "Using image: ${IMAGE_URI}"
+
+          # Create taskdef.json using Python to avoid quoting/heredoc issues
+          python3 - <<PY > taskdef.json
+import json, os
+task = {
+  "family": os.environ["TASK_FAMILY"],
   "networkMode": "awsvpc",
-  "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole",
-  "taskRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/ecsTaskExecutionRole",
+  "executionRoleArn": f"arn:aws:iam::{os.environ['AWS_ACCOUNT_ID']}:role/ecsTaskExecutionRole",
+  "taskRoleArn": f"arn:aws:iam::{os.environ['AWS_ACCOUNT_ID']}:role/ecsTaskExecutionRole",
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "256",
   "memory": "512",
   "containerDefinitions": [
     {
-      "name": "${CONTAINER_NAME}",
-      "image": "${IMAGE_URI}",
-      "portMappings": [{"containerPort": ${CONTAINER_PORT}, "protocol": "tcp"}],
-      "essential": true,
+      "name": os.environ["CONTAINER_NAME"],
+      "image": os.environ["IMAGE_URI"] if False else os.environ["IMAGE_URI"],  # placeholder replaced below
+      "portMappings": [{"containerPort": int(os.environ["CONTAINER_PORT"]), "protocol": "tcp"}],
+      "essential": True,
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
-          "awslogs-group": "/ecs/${SERVICE_NAME}",
-          "awslogs-region": "${AWS_REGION}",
+          "awslogs-group": f"/ecs/{os.environ['SERVICE_NAME']}",
+          "awslogs-region": os.environ["AWS_REGION"],
           "awslogs-stream-prefix": "ecs"
         }
       }
     }
   ]
 }
-EOF
+# Fix image uri value without the extra placeholder key (ensures valid JSON)
+task["containerDefinitions"][0]["image"] = os.environ["IMAGE_URI"]
+json.dump(task, open("taskdef.json","w"), indent=2)
+PY
 
-          # Register the task definition
+          # show the generated JSON for debugging
+          echo "--- taskdef.json ---"
+          cat taskdef.json
+          echo "--------------------"
+
+          # Register task definition
           aws ecs register-task-definition --cli-input-json file://taskdef.json
 
-          # Update ECS service to force new deployment (will pull the new image)
-          aws ecs update-service --cluster ${CLUSTER_NAME} --service ${SERVICE_NAME} --force-new-deployment
+          # Force new deployment (updates service with latest task definition)
+          aws ecs update-service --cluster "${CLUSTER_NAME}" --service "${SERVICE_NAME}" --force-new-deployment --region "${AWS_REGION}"
+

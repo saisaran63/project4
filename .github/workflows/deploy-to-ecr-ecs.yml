@@ -48,7 +48,8 @@ jobs:
           docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/$ECR_REPOSITORY:latest
 
       
-      - name: Register new task definition and update ECS service
+      
+      - name: Register new task definition and update ECS service (verbose debug)
         env:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -60,20 +61,53 @@ jobs:
           CONTAINER_PORT: ${{ env.CONTAINER_PORT }}
         run: |
           set -euo pipefail
+          # show executed commands
+          set -x
 
-          # sanity check required env vars
+          echo "===== Debug start: environment summary (secrets hidden) ====="
           for v in AWS_REGION AWS_ACCOUNT_ID ECR_REPOSITORY TASK_FAMILY CLUSTER_NAME SERVICE_NAME CONTAINER_NAME CONTAINER_PORT; do
+            val="${!v:-}"
+            if [ -z "$val" ]; then
+              echo "ENV MISSING -> $v = <EMPTY>"
+            else
+              # hide anything that looks like a secret (account id safe to print)
+              if [ "$v" = "AWS_SECRET_ACCESS_KEY" ] || [ "$v" = "AWS_ACCESS_KEY_ID" ]; then
+                echo "$v = <hidden>"
+              else
+                echo "$v = $val"
+              fi
+            fi
+          done
+          echo "===== Debug end ====="
+
+          # Ensure jq is available for pretty printing JSON in logs
+          if ! command -v jq > /dev/null 2>&1; then
+            echo "jq not found, installing jq..."
+            sudo apt-get update -y
+            sudo apt-get install -y jq || { echo "jq install failed"; }
+          fi
+
+          # Validate AWS CLI credentials early
+          echo "Checking AWS identity..."
+          if ! aws sts get-caller-identity --region "${AWS_REGION}"; then
+            echo "ERROR: AWS CLI credentials invalid or AWS_REGION wrong. Check GitHub secrets." >&2
+            exit 5
+          fi
+
+          # Build IMAGE_URI and export so child processes see it
+          IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:latest"
+          export IMAGE_URI
+          echo "IMAGE_URI set to: ${IMAGE_URI}"
+
+          # Validate required env values again and fail with explicit message
+          for v in TASK_FAMILY CLUSTER_NAME SERVICE_NAME CONTAINER_NAME CONTAINER_PORT IMAGE_URI; do
             if [ -z "${!v:-}" ]; then
-              echo "Missing env var: $v" >&2
-              exit 2
+              echo "ERROR: Required env var '$v' is empty" >&2
+              exit 6
             fi
           done
 
-          IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:latest"
-          echo "Using image: ${IMAGE_URI}"
-          echo "Cluster: ${CLUSTER_NAME}, Service: ${SERVICE_NAME}, TaskFamily: ${TASK_FAMILY}"
-
-          # create taskdef.json using a shell here-doc (variables expanded)
+          # Create taskdef.json via safe here-doc with variable expansion
           cat > taskdef.json <<EOF
 {
   "family": "${TASK_FAMILY}",
@@ -107,15 +141,14 @@ jobs:
 }
 EOF
 
-          echo "--- generated taskdef.json ---"
-          jq . taskdef.json || cat taskdef.json
-          echo "------------------------------"
+          echo "===== Generated taskdef.json ====="
+          if command -v jq > /dev/null 2>&1; then
+            jq . taskdef.json
+          else
+            cat taskdef.json
+          fi
+          echo "================================="
 
-          # quick AWS auth check (will fail early if credentials are wrong)
-          aws sts get-caller-identity --region "${AWS_REGION}"
-
-          # register the task definition
-          aws ecs register-task-definition --cli-input-json file://taskdef.json
-
-          # force ECS to pick up the new task definition (new deployment)
-          aws ecs update-service --cluster "${CLUSTER_NAME}" --service "${SERVICE_NAME}" --force-new-deployment --region "${AWS_REGION}"
+          # Register task definition - capture output and exit code
+          echo "Registering task definition..."
+          if ! REG_OUT=$(aws ecs register-task-definition --cli-input-json file://taskde_

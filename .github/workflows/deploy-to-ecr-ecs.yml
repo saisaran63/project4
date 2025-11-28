@@ -9,7 +9,7 @@ env:
   CONTAINER_NAME: container
   CONTAINER_PORT: 80
   CLUSTER_NAME: devops-cluster
-  SERVICE_NAME: ecs-task-service-c7qhc25h    # update if your service name is different
+  SERVICE_NAME: ecs-task-service-c7qhc25h    # update if different
 
 jobs:
   build-and-deploy:
@@ -27,28 +27,31 @@ jobs:
 
       - name: Login to Amazon ECR
         run: |
+          set -euo pipefail
           aws ecr get-login-password --region ${{ secrets.AWS_REGION }} \
             | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
 
       - name: Build Docker image
         run: |
+          set -euo pipefail
           docker build -t $ECR_REPOSITORY .
 
       - name: Tag image for ECR
         run: |
+          set -euo pipefail
           docker tag $ECR_REPOSITORY:latest ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/$ECR_REPOSITORY:latest
 
       - name: Create ECR repo if not exists
         run: |
+          set -euo pipefail
           aws ecr describe-repositories --repository-names $ECR_REPOSITORY || \
           aws ecr create-repository --repository-name $ECR_REPOSITORY
 
       - name: Push image to ECR
         run: |
+          set -euo pipefail
           docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/$ECR_REPOSITORY:latest
 
-      
-      
       - name: Register new task definition and update ECS service (verbose debug)
         env:
           AWS_REGION: ${{ secrets.AWS_REGION }}
@@ -61,45 +64,38 @@ jobs:
           CONTAINER_PORT: ${{ env.CONTAINER_PORT }}
         run: |
           set -euo pipefail
-          # show executed commands
           set -x
 
-          echo "===== Debug start: environment summary (secrets hidden) ====="
+          echo "===== Environment summary (secrets hidden) ====="
           for v in AWS_REGION AWS_ACCOUNT_ID ECR_REPOSITORY TASK_FAMILY CLUSTER_NAME SERVICE_NAME CONTAINER_NAME CONTAINER_PORT; do
             val="${!v:-}"
             if [ -z "$val" ]; then
               echo "ENV MISSING -> $v = <EMPTY>"
             else
-              # hide anything that looks like a secret (account id safe to print)
-              if [ "$v" = "AWS_SECRET_ACCESS_KEY" ] || [ "$v" = "AWS_ACCESS_KEY_ID" ]; then
-                echo "$v = <hidden>"
-              else
-                echo "$v = $val"
-              fi
+              echo "$v = $val"
             fi
           done
-          echo "===== Debug end ====="
+          echo "==============================================="
 
-          # Ensure jq is available for pretty printing JSON in logs
+          # install jq if missing so JSON prints don't fail
           if ! command -v jq > /dev/null 2>&1; then
-            echo "jq not found, installing jq..."
+            echo "Installing jq..."
             sudo apt-get update -y
-            sudo apt-get install -y jq || { echo "jq install failed"; }
+            sudo apt-get install -y jq || true
           fi
 
-          # Validate AWS CLI credentials early
+          # validate AWS creds
           echo "Checking AWS identity..."
           if ! aws sts get-caller-identity --region "${AWS_REGION}"; then
             echo "ERROR: AWS CLI credentials invalid or AWS_REGION wrong. Check GitHub secrets." >&2
             exit 5
           fi
 
-          # Build IMAGE_URI and export so child processes see it
           IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:latest"
           export IMAGE_URI
-          echo "IMAGE_URI set to: ${IMAGE_URI}"
+          echo "IMAGE_URI = ${IMAGE_URI}"
 
-          # Validate required env values again and fail with explicit message
+          # ensure required env variables present
           for v in TASK_FAMILY CLUSTER_NAME SERVICE_NAME CONTAINER_NAME CONTAINER_PORT IMAGE_URI; do
             if [ -z "${!v:-}" ]; then
               echo "ERROR: Required env var '$v' is empty" >&2
@@ -107,7 +103,7 @@ jobs:
             fi
           done
 
-          # Create taskdef.json via safe here-doc with variable expansion
+          # build taskdef.json with shell here-doc (variables expanded)
           cat > taskdef.json <<EOF
 {
   "family": "${TASK_FAMILY}",
@@ -149,6 +145,24 @@ EOF
           fi
           echo "================================="
 
-          # Register task definition - capture output and exit code
           echo "Registering task definition..."
-          if ! REG_OUT=$(aws ecs register-task-definition --cli-input-json file://taskde_
+          if ! REG_OUT=$(aws ecs register-task-definition --cli-input-json file://taskdef.json 2>&1); then
+            echo "ERROR: register-task-definition failed" >&2
+            echo "$REG_OUT" >&2
+            exit 7
+          else
+            echo "register-task-definition succeeded"
+            echo "$REG_OUT" | jq . || echo "$REG_OUT"
+          fi
+
+          echo "Updating ECS service (force new deployment)..."
+          if ! UPD_OUT=$(aws ecs update-service --cluster "${CLUSTER_NAME}" --service "${SERVICE_NAME}" --force-new-deployment --region "${AWS_REGION}" 2>&1); then
+            echo "ERROR: update-service failed" >&2
+            echo "$UPD_OUT" >&2
+            exit 8
+          else
+            echo "update-service succeeded"
+            echo "$UPD_OUT" | jq . || echo "$UPD_OUT"
+          fi
+
+          echo "Deployment triggered successfully. Check ECS console for new tasks."

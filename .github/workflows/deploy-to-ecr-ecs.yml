@@ -60,45 +60,62 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Build image URI and export it so Python can read it from os.environ
           IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:latest"
+          export IMAGE_URI
           echo "Using image: ${IMAGE_URI}"
+          echo "Cluster: ${CLUSTER_NAME}, Service: ${SERVICE_NAME}, TaskFamily: ${TASK_FAMILY}"
 
-          # Create taskdef.json using Python to avoid quoting/heredoc issues
-          python3 - <<PY > taskdef.json
-import json, os
-task = {
-  "family": os.environ["TASK_FAMILY"],
-  "networkMode": "awsvpc",
-  "executionRoleArn": f"arn:aws:iam::{os.environ['AWS_ACCOUNT_ID']}:role/ecsTaskExecutionRole",
-  "taskRoleArn": f"arn:aws:iam::{os.environ['AWS_ACCOUNT_ID']}:role/ecsTaskExecutionRole",
-  "requiresCompatibilities": ["FARGATE"],
-  "cpu": "256",
-  "memory": "512",
-  "containerDefinitions": [
-    {
-      "name": os.environ["CONTAINER_NAME"],
-      "image": os.environ["IMAGE_URI"] if False else os.environ["IMAGE_URI"],
-      "portMappings": [{"containerPort": int(os.environ["CONTAINER_PORT"]), "protocol": "tcp"}],
-      "essential": True,
-      "logConfiguration": {
-        "logDriver": "awslogs",
-        "options": {
-          "awslogs-group": f"/ecs/{os.environ['SERVICE_NAME']}",
-          "awslogs-region": os.environ["AWS_REGION"],
-          "awslogs-stream-prefix": "ecs"
+          # Show that python3 exists and print its version (debug)
+          which python3 || { echo "python3 not found"; exit 1; }
+          python3 --version
+
+          # Create taskdef.json using Python (reads IMAGE_URI from env)
+          python3 - <<'PY' > taskdef.json
+import json, os, sys
+try:
+    task = {
+      "family": os.environ["TASK_FAMILY"],
+      "networkMode": "awsvpc",
+      "executionRoleArn": f"arn:aws:iam::{os.environ['AWS_ACCOUNT_ID']}:role/ecsTaskExecutionRole",
+      "taskRoleArn": f"arn:aws:iam::{os.environ['AWS_ACCOUNT_ID']}:role/ecsTaskExecutionRole",
+      "requiresCompatibilities": ["FARGATE"],
+      "cpu": "256",
+      "memory": "512",
+      "containerDefinitions": [
+        {
+          "name": os.environ["CONTAINER_NAME"],
+          "image": os.environ["IMAGE_URI"],
+          "portMappings": [{"containerPort": int(os.environ.get("CONTAINER_PORT","80")), "protocol": "tcp"}],
+          "essential": True,
+          "logConfiguration": {
+            "logDriver": "awslogs",
+            "options": {
+              "awslogs-group": f"/ecs/{os.environ['SERVICE_NAME']}",
+              "awslogs-region": os.environ["AWS_REGION"],
+              "awslogs-stream-prefix": "ecs"
+            }
+          }
         }
-      }
+      ]
     }
-  ]
-}
-task["containerDefinitions"][0]["image"] = os.environ["IMAGE_URI"]
+except KeyError as e:
+    print("Missing environment variable:", e, file=sys.stderr)
+    sys.exit(2)
+
 json.dump(task, open("taskdef.json","w"), indent=2)
 PY
 
+          # print the generated JSON so you can inspect it in Actions logs
           echo "--- taskdef.json ---"
           cat taskdef.json
           echo "--------------------"
 
+          # Check AWS CLI auth quickly
+          aws sts get-caller-identity --region "${AWS_REGION}"
+
+          # Register task definition
           aws ecs register-task-definition --cli-input-json file://taskdef.json
 
+          # Update ECS service (force a new deployment)
           aws ecs update-service --cluster "${CLUSTER_NAME}" --service "${SERVICE_NAME}" --force-new-deployment --region "${AWS_REGION}"

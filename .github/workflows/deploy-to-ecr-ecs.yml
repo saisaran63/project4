@@ -6,13 +6,18 @@ on:
 
 env:
   ECR_REPOSITORY: devops-microservice
-  CONTAINER_NAME: container        # name used in task definition
-  CONTAINER_PORT: 80               # change if your app uses different port
+  CONTAINER_NAME: container
+  CONTAINER_PORT: 80
+  CLUSTER_NAME: devops-cluster
+  SERVICE_NAME: ecs-task-service-c7qhc25h    # update if your service name is different
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
@@ -42,18 +47,16 @@ jobs:
         run: |
           docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/$ECR_REPOSITORY:latest
 
-      } --service ${SERVICE_NAME} --force-new-deployment
-
       - name: Register new task definition and update ECS service
         env:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-          ECR_REPOSITORY: devops-microservice
+          ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
           TASK_FAMILY: devops-microservice-task
-          CLUSTER_NAME: devops-cluster
-          SERVICE_NAME: ecs-task-service-c7qhc25h    # <- use your actual service name
-          CONTAINER_NAME: container
-          CONTAINER_PORT: 80
+          CLUSTER_NAME: ${{ env.CLUSTER_NAME }}
+          SERVICE_NAME: ${{ env.SERVICE_NAME }}
+          CONTAINER_NAME: ${{ env.CONTAINER_NAME }}
+          CONTAINER_PORT: ${{ env.CONTAINER_PORT }}
         run: |
           set -euo pipefail
 
@@ -74,7 +77,7 @@ task = {
   "containerDefinitions": [
     {
       "name": os.environ["CONTAINER_NAME"],
-      "image": os.environ["IMAGE_URI"] if False else os.environ["IMAGE_URI"],  # placeholder replaced below
+      "image": os.environ["IMAGE_URI"] if False else os.environ["IMAGE_URI"],
       "portMappings": [{"containerPort": int(os.environ["CONTAINER_PORT"]), "protocol": "tcp"}],
       "essential": True,
       "logConfiguration": {
@@ -88,19 +91,14 @@ task = {
     }
   ]
 }
-# Fix image uri value without the extra placeholder key (ensures valid JSON)
 task["containerDefinitions"][0]["image"] = os.environ["IMAGE_URI"]
 json.dump(task, open("taskdef.json","w"), indent=2)
 PY
 
-          # show the generated JSON for debugging
           echo "--- taskdef.json ---"
           cat taskdef.json
           echo "--------------------"
 
-          # Register task definition
           aws ecs register-task-definition --cli-input-json file://taskdef.json
 
-          # Force new deployment (updates service with latest task definition)
           aws ecs update-service --cluster "${CLUSTER_NAME}" --service "${SERVICE_NAME}" --force-new-deployment --region "${AWS_REGION}"
-
